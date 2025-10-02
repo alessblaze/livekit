@@ -17,7 +17,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -992,30 +994,32 @@ func (r *RoomManager) iceServersForParticipant(apiKey string, participant types.
 	rtcConf := r.config.RTC
 
 	// Add Cloudflare TURN servers if configured
-	if r.config.TURN.CFTurnKeyID != "" && r.config.TURN.CFAPIToken != "" {
+	if r.config.TURN.CloudflareEnabled && r.config.TURN.CFTurnKeyID != "" && r.config.TURN.CFAPIToken != "" {
 		if cfTurnDebug() {
 			logger.Debugw("CF TURN: Fetching credentials for participant", "participant", participant.Identity())
 		}
 		if cfServers, err := FetchCloudflareCredentials(&r.config.TURN); err == nil {
 			for _, server := range cfServers {
-				scheme := "turn"
-				transport := "tcp"
+				// Format host:port for URL (bracket IPv6 addresses)
+				hostPort := net.JoinHostPort(server.Host, strconv.Itoa(server.Port))
+
+				var url string
 				if server.Protocol == "tls" {
-					scheme = "turns"
-				} else if server.Protocol == "udp" {
-					transport = "udp"
+					url = fmt.Sprintf("turns:%s", hostPort)
+				} else if server.Protocol == "tcp" {
+					url = fmt.Sprintf("turn:%s?transport=tcp", hostPort)
+				} else {
+					url = fmt.Sprintf("turn:%s", hostPort)
 				}
 				is := &livekit.ICEServer{
-					Urls: []string{
-						fmt.Sprintf("%s:%s:%d?transport=%s", scheme, server.Host, server.Port, transport),
-					},
+					Urls:       []string{url},
 					Username:   server.Username,
 					Credential: server.Credential,
 				}
 				iceServers = append(iceServers, is)
 
 				if cfTurnDebug() {
-					logger.Debugw("CF TURN: Added ICE server", "url", is.Urls[0], "username", server.Username[:8]+"...")
+					logger.Debugw("CF TURN: Added ICE server", "url", is.Urls[0], "username", previewCredential(server.Username))
 				}
 			}
 			if cfTurnDebug() {
@@ -1091,67 +1095,79 @@ func (r *RoomManager) iceServersForParticipant(apiKey string, participant types.
 		}
 	}
 
-	if tlsOnly && r.config.TURN.TLSPort == 0 {
-		logger.Warnw("tls only enabled but no turn tls config", nil)
-		tlsOnly = false
-	}
-
 	hasSTUN := false
-	if r.config.TURN.Enabled {
-		var urls []string
-		if r.config.TURN.UDPPort > 0 && !tlsOnly {
-			// UDP TURN is used as STUN
+	if !r.config.TURN.CloudflareEnabled {
+		// Only use embedded/external TURN servers if Cloudflare is not enabled
+		if tlsOnly && r.config.TURN.TLSPort == 0 {
+			logger.Warnw("tls only enabled but no turn tls config", nil)
+			tlsOnly = false
+		}
+
+		if r.config.TURN.Enabled {
+			var urls []string
+			if r.config.TURN.UDPPort > 0 && !tlsOnly {
+				// UDP TURN is used as STUN
+				hasSTUN = true
+				hostPort := net.JoinHostPort(r.config.RTC.NodeIP, strconv.Itoa(r.config.TURN.UDPPort))
+				urls = append(urls, fmt.Sprintf("turn:%s?transport=udp", hostPort))
+			}
+			// Use configured TLS port, fallback to RFC 7065 default (5349)
+			port := r.config.TURN.TLSPort
+			if port == 0 {
+				port = 5349
+			}
+			if port > 0 {
+				hostPort := net.JoinHostPort(r.config.TURN.Domain, strconv.Itoa(port))
+				urls = append(urls, fmt.Sprintf("turns:%s", hostPort))
+			}
+			if len(urls) > 0 {
+				username := r.turnAuthHandler.CreateUsername(apiKey, participant.ID())
+				password, err := r.turnAuthHandler.CreatePassword(apiKey, participant.ID())
+				if err != nil {
+					participant.GetLogger().Warnw("could not create turn password", err)
+					hasSTUN = false
+				} else {
+					logger.Infow("created TURN password", "username", username, "password", password)
+					iceServers = append(iceServers, &livekit.ICEServer{
+						Urls:       urls,
+						Username:   username,
+						Credential: password,
+					})
+				}
+			}
+		}
+
+		if len(rtcConf.TURNServers) > 0 {
 			hasSTUN = true
-			urls = append(urls, fmt.Sprintf("turn:%s:%d?transport=udp", r.config.RTC.NodeIP, r.config.TURN.UDPPort))
-		}
-		if r.config.TURN.TLSPort > 0 {
-			urls = append(urls, fmt.Sprintf("turns:%s:443?transport=tcp", r.config.TURN.Domain))
-		}
-		if len(urls) > 0 {
-			username := r.turnAuthHandler.CreateUsername(apiKey, participant.ID())
-			password, err := r.turnAuthHandler.CreatePassword(apiKey, participant.ID())
-			if err != nil {
-				participant.GetLogger().Warnw("could not create turn password", err)
-				hasSTUN = false
-			} else {
-				logger.Infow("created TURN password", "username", username, "password", password)
-				iceServers = append(iceServers, &livekit.ICEServer{
-					Urls:       urls,
-					Username:   username,
-					Credential: password,
-				})
+			for _, s := range r.config.RTC.TURNServers {
+				// Format host:port for URL (bracket IPv6 addresses)
+				hostPort := net.JoinHostPort(s.Host, strconv.Itoa(s.Port))
+
+				var url string
+				if s.Protocol == "tls" {
+					url = fmt.Sprintf("turns:%s", hostPort)
+				} else if s.Protocol == "tcp" {
+					url = fmt.Sprintf("turn:%s?transport=tcp", hostPort)
+				} else {
+					url = fmt.Sprintf("turn:%s", hostPort)
+				}
+				is := &livekit.ICEServer{
+					Urls:       []string{url},
+					Username:   s.Username,
+					Credential: s.Credential,
+				}
+				iceServers = append(iceServers, is)
 			}
 		}
-	}
 
-	if len(rtcConf.TURNServers) > 0 {
-		hasSTUN = true
-		for _, s := range r.config.RTC.TURNServers {
-			scheme := "turn"
-			transport := "tcp"
-			if s.Protocol == "tls" {
-				scheme = "turns"
-			} else if s.Protocol == "udp" {
-				transport = "udp"
-			}
-			is := &livekit.ICEServer{
-				Urls: []string{
-					fmt.Sprintf("%s:%s:%d?transport=%s", scheme, s.Host, s.Port, transport),
-				},
-				Username:   s.Username,
-				Credential: s.Credential,
-			}
-			iceServers = append(iceServers, is)
+		if len(rtcConf.STUNServers) > 0 {
+			hasSTUN = true
+			iceServers = append(iceServers, iceServerForStunServers(r.config.RTC.STUNServers))
 		}
-	}
 
-	if len(rtcConf.STUNServers) > 0 {
-		hasSTUN = true
-		iceServers = append(iceServers, iceServerForStunServers(r.config.RTC.STUNServers))
-	}
-
-	if !hasSTUN {
-		iceServers = append(iceServers, iceServerForStunServers(rtcconfig.DefaultStunServers))
+		if !hasSTUN {
+			iceServers = append(iceServers, iceServerForStunServers(rtcconfig.DefaultStunServers))
+		}
 	}
 	return iceServers
 }

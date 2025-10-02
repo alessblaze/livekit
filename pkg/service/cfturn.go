@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,8 +70,20 @@ func FetchCloudflareCredentials(turnConf *config.TURNConfig) ([]config.TURNServe
 	}
 	cfTurnLog("debug", "CF TURN: Making API request", "url", url, "token_prefix", tokenPrefix)
 
+	// Use configurable TTL, bound to Cloudflare's 48-hour maximum
+	ttl := 86400 // Default: 24 hours
+	if turnConf.CFTurnTTLSeconds > 0 {
+		ttl = turnConf.CFTurnTTLSeconds
+		// Enforce Cloudflare's 48-hour (172800 seconds) maximum
+		if ttl > 172800 {
+			ttl = 172800
+			cfTurnLog("warn", "CF TURN: TTL capped to Cloudflare maximum", "requested_ttl", turnConf.CFTurnTTLSeconds, "capped_ttl", ttl)
+		}
+	}
+	cfTurnLog("debug", "CF TURN: Using TTL", "ttl_seconds", ttl, "ttl_hours", float64(ttl)/3600)
+
 	payload := map[string]interface{}{
-		"ttl": 86400, // 24 hours
+		"ttl": ttl,
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -76,7 +91,7 @@ func FetchCloudflareCredentials(turnConf *config.TURNConfig) ([]config.TURNServe
 		cfTurnLog("error", "CF TURN: Failed to marshal payload", "error", err)
 		return nil, err
 	}
-	cfTurnLog("debug", "CF TURN: Request payload", "payload", string(jsonData))
+	cfTurnLog("debug", "CF TURN: Request payload", "ttl_seconds", ttl, "payload_size", len(jsonData))
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -213,42 +228,78 @@ func previewCredential(credential string) string {
 	return credential
 }
 
-func parseTurnURL(url, username, credential string) *config.TURNServer {
-	cfTurnLog("debug", "CF TURN: Parsing URL", "url", url)
+func parseTurnURL(turnURL, username, credential string) *config.TURNServer {
+	cfTurnLog("debug", "CF TURN: Parsing URL", "url", turnURL)
 
 	var protocol string
 	var host string
-	var port int = 3478
+	var port int
 
-	if strings.HasPrefix(url, "turns:") {
+	// Determine scheme and default port (RFC 7065)
+	if strings.HasPrefix(turnURL, "turns:") {
 		protocol = "tls"
-		port = 5349
-		host = strings.TrimPrefix(url, "turns:")
-		cfTurnLog("debug", "CF TURN: Detected TURNS protocol", "host_with_port", host, "default_port", port)
-	} else if strings.HasPrefix(url, "turn:") {
-		protocol = "udp"
-		host = strings.TrimPrefix(url, "turn:")
-		cfTurnLog("debug", "CF TURN: Detected TURN protocol", "host_with_port", host, "default_port", port)
+		port = 5349 // RFC 7065 default for TURNS
+		turnURL = strings.TrimPrefix(turnURL, "turns:")
+		cfTurnLog("debug", "CF TURN: Detected TURNS protocol", "default_port", port)
+	} else if strings.HasPrefix(turnURL, "turn:") {
+		protocol = "udp" // RFC 7065 default for TURN
+		port = 3478      // RFC 7065 default for TURN
+		turnURL = strings.TrimPrefix(turnURL, "turn:")
+		cfTurnLog("debug", "CF TURN: Detected TURN protocol", "default_port", port)
 	} else {
-		cfTurnLog("warn", "CF TURN: Unknown protocol in URL", "url", url)
+		cfTurnLog("warn", "CF TURN: Unknown protocol in URL", "url", turnURL)
 		return nil
 	}
 
-	// Parse host:port if present
-	if colonIndex := strings.LastIndex(host, ":"); colonIndex != -1 {
-		portStr := host[colonIndex+1:]
-		originalHost := host
-		host = host[:colonIndex]
-		cfTurnLog("debug", "CF TURN: Found port in URL", "original", originalHost, "host", host, "port_str", portStr)
-
-		var parsedPort int
-		if p, err := fmt.Sscanf(portStr, "%d", &parsedPort); err == nil && p == 1 && parsedPort > 0 && parsedPort <= 65535 {
-			port = parsedPort
-			cfTurnLog("debug", "CF TURN: Successfully parsed port", "port", port)
-		} else {
-			cfTurnLog("warn", "CF TURN: Invalid port, using default", "port_str", portStr, "parsed", parsedPort, "default_port", port)
+	// Extract query parameters manually (RFC 7065 - opaque URIs)
+	var queryParams url.Values
+	if idx := strings.Index(turnURL, "?"); idx != -1 {
+		queryString := turnURL[idx+1:]
+		turnURL = turnURL[:idx]
+		var err error
+		queryParams, err = url.ParseQuery(queryString)
+		if err != nil {
+			cfTurnLog("warn", "CF TURN: Failed to parse query parameters", "query", queryString, "error", err)
+			queryParams = make(url.Values)
 		}
 	} else {
+		queryParams = make(url.Values)
+	}
+
+	// Check for transport query parameter (RFC 7065)
+	if transport := queryParams.Get("transport"); transport != "" {
+		switch strings.ToLower(transport) {
+		case "tcp":
+			if protocol == "tls" {
+				// TURNS over TCP uses TLS (keep protocol as tls)
+			} else {
+				protocol = "tcp"
+			}
+			cfTurnLog("debug", "CF TURN: Transport parameter set to TCP", "final_protocol", protocol)
+		case "udp":
+			if protocol == "tls" {
+				// TURNS over UDP is not standard, but keep TLS
+			} else {
+				protocol = "udp"
+			}
+			cfTurnLog("debug", "CF TURN: Transport parameter set to UDP", "final_protocol", protocol)
+		default:
+			cfTurnLog("warn", "CF TURN: Unknown transport parameter", "transport", transport)
+		}
+	}
+
+	// Use net.SplitHostPort for IPv6-safe parsing
+	if h, p, err := net.SplitHostPort(turnURL); err == nil {
+		host = h
+		if parsedPort, err := strconv.Atoi(p); err == nil && parsedPort > 0 && parsedPort <= 65535 {
+			port = parsedPort
+			cfTurnLog("debug", "CF TURN: Successfully parsed host:port", "host", host, "port", port)
+		} else {
+			cfTurnLog("warn", "CF TURN: Invalid port, using default", "port_str", p, "default_port", port)
+		}
+	} else {
+		// No port specified, use hostname as-is
+		host = turnURL
 		cfTurnLog("debug", "CF TURN: No port specified, using default", "host", host, "default_port", port)
 	}
 
@@ -296,11 +347,16 @@ func (m *CFTurnManager) GetICEServers() ([]*livekit.ICEServer, error) {
 
 	var iceServers []*livekit.ICEServer
 	for _, server := range servers {
+		// Format host:port for URL (bracket IPv6 addresses)
+		hostPort := net.JoinHostPort(server.Host, strconv.Itoa(server.Port))
+
 		var url string
 		if server.Protocol == "tls" {
-			url = fmt.Sprintf("turns:%s:%d", server.Host, server.Port)
+			url = fmt.Sprintf("turns:%s", hostPort)
+		} else if server.Protocol == "tcp" {
+			url = fmt.Sprintf("turn:%s?transport=tcp", hostPort)
 		} else {
-			url = fmt.Sprintf("turn:%s:%d", server.Host, server.Port)
+			url = fmt.Sprintf("turn:%s", hostPort)
 		}
 		iceServer := &livekit.ICEServer{
 			Urls:       []string{url},

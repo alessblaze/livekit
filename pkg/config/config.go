@@ -211,6 +211,7 @@ type TURNConfig struct {
 	CloudflareEnabled   bool   `yaml:"cloudflare_enabled,omitempty"`
 	CFTurnKeyID         string `yaml:"cf_turn_key_id,omitempty"`
 	CFAPIToken          string `yaml:"cf_api_token,omitempty"`
+	CFTurnTTLSeconds    int    `yaml:"cf_turn_ttl_seconds,omitempty"`
 }
 
 type NodeSelectorConfig struct {
@@ -506,6 +507,9 @@ func NewConfig(confString string, strictMode bool, c *cli.Command, baseFlags []c
 
 func (conf *Config) IsTURNSEnabled() bool {
 	if conf.TURN.Enabled && conf.TURN.TLSPort != 0 {
+		return true
+	}
+	if conf.TURN.CloudflareEnabled {
 		return true
 	}
 	for _, s := range conf.RTC.TURNServers {
