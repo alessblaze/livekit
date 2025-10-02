@@ -208,10 +208,10 @@ type TURNConfig struct {
 	RelayPortRangeEnd   uint16 `yaml:"relay_range_end,omitempty"`
 	ExternalTLS         bool   `yaml:"external_tls,omitempty"`
 	// Cloudflare TURN integration
-	CloudflareEnabled   bool   `yaml:"cloudflare_enabled,omitempty"`
-	CFTurnKeyID         string `yaml:"cf_turn_key_id,omitempty"`
-	CFAPIToken          string `yaml:"cf_api_token,omitempty"`
-	CFTurnTTLSeconds    int    `yaml:"cf_turn_ttl_seconds,omitempty"`
+	CloudflareEnabled bool   `yaml:"cloudflare_enabled,omitempty"`
+	CFTurnKeyID       string `yaml:"cf_turn_key_id,omitempty"`
+	CFAPIToken        string `yaml:"cf_api_token,omitempty"`
+	CFTurnTTLSeconds  int    `yaml:"cf_turn_ttl_seconds,omitempty"`
 }
 
 type NodeSelectorConfig struct {
@@ -490,16 +490,31 @@ func NewConfig(confString string, strictMode bool, c *cli.Command, baseFlags []c
 		conf.Limit.MaxRoomNameLength = conf.Room.MaxRoomNameLength
 	}
 
+	// TURN server validation
+	if conf.TURN.Enabled && conf.TURN.CloudflareEnabled {
+		return nil, fmt.Errorf("cannot enable both embedded TURN server and Cloudflare TURN simultaneously")
+	}
+
 	// Cloudflare TURN integration validation
 	if conf.TURN.CloudflareEnabled {
 		if conf.TURN.CFTurnKeyID == "" || conf.TURN.CFAPIToken == "" {
 			return nil, fmt.Errorf("cloudflare TURN enabled but missing cf_turn_key_id or cf_api_token")
 		}
+		// Clamp TTL to safe bounds: min 300s (5 min), max 172800s (48h), default 86400s (24h)
+		if conf.TURN.CFTurnTTLSeconds == 0 {
+			conf.TURN.CFTurnTTLSeconds = 86400 // 24 hours default
+		} else if conf.TURN.CFTurnTTLSeconds < 300 {
+			conf.TURN.CFTurnTTLSeconds = 300 // 5 minutes minimum
+			logger.Warnw("Cloudflare TURN TTL too low, clamped to minimum", nil, "ttl_seconds", 300)
+		} else if conf.TURN.CFTurnTTLSeconds > 172800 {
+			conf.TURN.CFTurnTTLSeconds = 172800 // 48 hours maximum
+			logger.Warnw("Cloudflare TURN TTL too high, clamped to maximum", nil, "ttl_seconds", 172800)
+		}
 		tokenPreview := "<empty>"
 		if len(conf.TURN.CFAPIToken) > 8 {
 			tokenPreview = conf.TURN.CFAPIToken[:8] + "..."
 		}
-		logger.Infow("Cloudflare TURN integration enabled", "turn_key_id", conf.TURN.CFTurnKeyID, "token", tokenPreview)
+		logger.Infow("Cloudflare TURN integration enabled", "turn_key_id", conf.TURN.CFTurnKeyID, "token", tokenPreview, "ttl_seconds", conf.TURN.CFTurnTTLSeconds)
 	}
 
 	return &conf, nil

@@ -273,6 +273,11 @@ keys:
 #   # optional (set only if not using external TLS termination)
 #   # cert_file: /path/to/cert.pem
 #   # key_file: /path/to/key.pem
+#   # Cloudflare TURN integration (alternative to external TURN server)
+#   # cloudflare_enabled: false
+#   # cf_turn_key_id: "your-cloudflare-turn-key-id"
+#   # cf_api_token: "your-cloudflare-api-token"
+#   # cf_turn_ttl_seconds: 86400  # 24 hours (default), max 172800 (48 hours)
 
 # ingress server
 # ingress:
