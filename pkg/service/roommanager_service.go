@@ -134,6 +134,7 @@ func (s whipService) Create(ctx context.Context, req *rpc.WHIPCreateRequest) (*r
 		iceServers = s.RoomManager.iceServersForParticipant(
 			apiKey,
 			lp,
+			room.Name(),
 			false,
 		)
 	}

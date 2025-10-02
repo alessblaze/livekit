@@ -54,6 +54,16 @@ const (
 	tokenDefaultTTL      = 10 * time.Minute
 )
 
+// CFTurnCredentialInfo stores comprehensive CF TURN credential mapping
+type CFTurnCredentialInfo struct {
+	RoomName        livekit.RoomName            `json:"room_name"`
+	ParticipantID   livekit.ParticipantID       `json:"participant_id"`
+	ParticipantName string                      `json:"participant_name"`
+	Identity        livekit.ParticipantIdentity `json:"identity"`
+	Username        string                      `json:"username"`
+	CreatedAt       time.Time                   `json:"created_at"`
+}
+
 type iceConfigCacheKey struct {
 	roomName            livekit.RoomName
 	participantIdentity livekit.ParticipantIdentity
@@ -91,6 +101,9 @@ type RoomManager struct {
 	whipParticipantServers       utils.MultitonService[rpc.ParticipantTopic]
 
 	iceConfigCache *sutils.IceConfigCache[iceConfigCacheKey]
+
+	// CF TURN credential mapping with full context
+	cfTurnCredentials sync.Map // map[string]*CFTurnCredentialInfo
 
 	forwardStats *sfu.ForwardStats
 
@@ -259,6 +272,15 @@ func (r *RoomManager) Stop() {
 
 	r.iceConfigCache.Stop()
 
+	// Clean up CF TURN credentials
+	r.cfTurnCredentials.Range(func(key, value interface{}) bool {
+		if cred := value.(*CFTurnCredentialInfo); cred != nil {
+			RevokeCloudflareCredentials(&r.config.TURN, cred.Username)
+		}
+		r.cfTurnCredentials.Delete(key)
+		return true
+	})
+
 	if r.forwardStats != nil {
 		r.forwardStats.Stop()
 	}
@@ -356,6 +378,7 @@ func (r *RoomManager) StartSession(
 				r.iceServersForParticipant(
 					apiKey,
 					participant,
+					room.Name(),
 					iceConfig.PreferenceSubscriber == livekit.ICECandidateType_ICT_TLS,
 				),
 				pi.ReconnectReason,
@@ -509,7 +532,7 @@ func (r *RoomManager) StartSession(
 	opts := rtc.ParticipantOptions{
 		AutoSubscribe: pi.AutoSubscribe,
 	}
-	iceServers := r.iceServersForParticipant(apiKey, participant, iceConfig.PreferenceSubscriber == livekit.ICECandidateType_ICT_TLS)
+	iceServers := r.iceServersForParticipant(apiKey, participant, room.Name(), iceConfig.PreferenceSubscriber == livekit.ICECandidateType_ICT_TLS)
 	if err = room.Join(participant, requestSource, &opts, iceServers); err != nil {
 		pLogger.Errorw("could not join room", err)
 		_ = participant.Close(true, types.ParticipantCloseReasonJoinFailed, false)
@@ -964,9 +987,109 @@ func (r *RoomManager) DeleteDispatch(ctx context.Context, req *livekit.DeleteAge
 	return disp, nil
 }
 
-func (r *RoomManager) iceServersForParticipant(apiKey string, participant types.LocalParticipant, tlsOnly bool) []*livekit.ICEServer {
+func (r *RoomManager) iceServersForParticipant(apiKey string, participant types.LocalParticipant, roomName livekit.RoomName, tlsOnly bool) []*livekit.ICEServer {
 	var iceServers []*livekit.ICEServer
 	rtcConf := r.config.RTC
+
+	// Add Cloudflare TURN servers if configured
+	if r.config.TURN.CFTurnKeyID != "" && r.config.TURN.CFAPIToken != "" {
+		if cfTurnDebug() {
+			logger.Debugw("CF TURN: Fetching credentials for participant", "participant", participant.Identity())
+		}
+		if cfServers, err := FetchCloudflareCredentials(&r.config.TURN); err == nil {
+			for _, server := range cfServers {
+				scheme := "turn"
+				transport := "tcp"
+				if server.Protocol == "tls" {
+					scheme = "turns"
+				} else if server.Protocol == "udp" {
+					transport = "udp"
+				}
+				is := &livekit.ICEServer{
+					Urls: []string{
+						fmt.Sprintf("%s:%s:%d?transport=%s", scheme, server.Host, server.Port, transport),
+					},
+					Username:   server.Username,
+					Credential: server.Credential,
+				}
+				iceServers = append(iceServers, is)
+
+				if cfTurnDebug() {
+					logger.Debugw("CF TURN: Added ICE server", "url", is.Urls[0], "username", server.Username[:8]+"...")
+				}
+			}
+			if cfTurnDebug() {
+				logger.Infow("CF TURN: Successfully added servers", "count", len(cfServers), "participant", participant.Identity())
+			}
+			// Store comprehensive mapping and add revocation callback
+			if len(cfServers) > 0 {
+				firstUsername := cfServers[0].Username
+
+				// Create comprehensive credential info
+				credInfo := &CFTurnCredentialInfo{
+					RoomName:        roomName,
+					ParticipantID:   participant.ID(),
+					ParticipantName: participant.ToProto().Name,
+					Identity:        participant.Identity(),
+					Username:        firstUsername,
+					CreatedAt:       time.Now(),
+				}
+
+				// Store with composite key: roomName:participantID
+				key := fmt.Sprintf("%s:%s", roomName, participant.ID())
+				r.cfTurnCredentials.Store(key, credInfo)
+
+				// Log credential mapping for audit trail
+				if cfTurnDebug() {
+					logger.Infow("CF TURN credential created",
+						"room_name", credInfo.RoomName,
+						"participant_id", credInfo.ParticipantID,
+						"user_identity", credInfo.Identity,
+						"cf_username", previewCredential(credInfo.Username),
+						"created_at", credInfo.CreatedAt.Format(time.RFC3339))
+				}
+
+				participant.AddOnClose("cf_turn_revoke", func(p types.LocalParticipant) {
+					go func() {
+						// Find and remove credential by participant ID
+						var credToRevoke *CFTurnCredentialInfo
+						r.cfTurnCredentials.Range(func(k, v interface{}) bool {
+							if cred := v.(*CFTurnCredentialInfo); cred.ParticipantID == p.ID() {
+								credToRevoke = cred
+								r.cfTurnCredentials.Delete(k)
+								return false // stop iteration
+							}
+							return true
+						})
+
+						if credToRevoke != nil {
+							if err := RevokeCloudflareCredentials(&r.config.TURN, credToRevoke.Username); err != nil {
+								if cfTurnDebug() {
+									p.GetLogger().Warnw("Failed to revoke CF TURN credentials", err,
+										"room_name", credToRevoke.RoomName,
+										"participant_id", credToRevoke.ParticipantID,
+										"user_identity", credToRevoke.Identity,
+										"cf_username", previewCredential(credToRevoke.Username),
+										"created_at", credToRevoke.CreatedAt.Format(time.RFC3339))
+								}
+							} else {
+								if cfTurnDebug() {
+									p.GetLogger().Infow("CF TURN credential revoked",
+										"room_name", credToRevoke.RoomName,
+										"participant_id", credToRevoke.ParticipantID,
+										"user_identity", credToRevoke.Identity,
+										"cf_username", previewCredential(credToRevoke.Username),
+										"created_at", credToRevoke.CreatedAt.Format(time.RFC3339))
+								}
+							}
+						}
+					}()
+				})
+			}
+		} else {
+			logger.Errorw("CF TURN: Failed to fetch credentials", err, "participant", participant.Identity())
+		}
+	}
 
 	if tlsOnly && r.config.TURN.TLSPort == 0 {
 		logger.Warnw("tls only enabled but no turn tls config", nil)
@@ -1076,6 +1199,56 @@ func (r *RoomManager) getFirstKeyPair() (string, string, error) {
 		return key, secret, nil
 	}
 	return "", "", errors.New("no API keys configured")
+}
+
+// GetCFTurnCredentials returns current CF TURN credential mappings for debugging
+func (r *RoomManager) GetCFTurnCredentials() map[string]*CFTurnCredentialInfo {
+	credentials := make(map[string]*CFTurnCredentialInfo)
+	r.cfTurnCredentials.Range(func(key, value interface{}) bool {
+		credentials[key.(string)] = value.(*CFTurnCredentialInfo)
+		return true
+	})
+	return credentials
+}
+
+// GetCFTurnCredentialsByRoom returns CF TURN credentials for a specific room
+func (r *RoomManager) GetCFTurnCredentialsByRoom(roomName livekit.RoomName) []*CFTurnCredentialInfo {
+	var credentials []*CFTurnCredentialInfo
+	r.cfTurnCredentials.Range(func(key, value interface{}) bool {
+		if cred := value.(*CFTurnCredentialInfo); cred.RoomName == roomName {
+			credentials = append(credentials, cred)
+		}
+		return true
+	})
+	return credentials
+}
+
+// RevokeCFTurnCredentialsByRoom revokes all CF TURN credentials for a room
+func (r *RoomManager) RevokeCFTurnCredentialsByRoom(roomName livekit.RoomName) error {
+	var toRevoke []*CFTurnCredentialInfo
+	var keysToDelete []string
+
+	r.cfTurnCredentials.Range(func(key, value interface{}) bool {
+		if cred := value.(*CFTurnCredentialInfo); cred.RoomName == roomName {
+			toRevoke = append(toRevoke, cred)
+			keysToDelete = append(keysToDelete, key.(string))
+		}
+		return true
+	})
+
+	for _, key := range keysToDelete {
+		r.cfTurnCredentials.Delete(key)
+	}
+
+	for _, cred := range toRevoke {
+		if err := RevokeCloudflareCredentials(&r.config.TURN, cred.Username); err != nil {
+			logger.Warnw("Failed to revoke CF TURN credential", err,
+				"room", cred.RoomName,
+				"participant", cred.Identity,
+				"username", cred.Username)
+		}
+	}
+	return nil
 }
 
 // ------------------------------------

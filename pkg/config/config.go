@@ -207,6 +207,10 @@ type TURNConfig struct {
 	RelayPortRangeStart uint16 `yaml:"relay_range_start,omitempty"`
 	RelayPortRangeEnd   uint16 `yaml:"relay_range_end,omitempty"`
 	ExternalTLS         bool   `yaml:"external_tls,omitempty"`
+	// Cloudflare TURN integration
+	CloudflareEnabled   bool   `yaml:"cloudflare_enabled,omitempty"`
+	CFTurnKeyID         string `yaml:"cf_turn_key_id,omitempty"`
+	CFAPIToken          string `yaml:"cf_api_token,omitempty"`
 }
 
 type NodeSelectorConfig struct {
@@ -483,6 +487,18 @@ func NewConfig(confString string, strictMode bool, c *cli.Command, baseFlags []c
 	}
 	if conf.Room.MaxRoomNameLength != 0 {
 		conf.Limit.MaxRoomNameLength = conf.Room.MaxRoomNameLength
+	}
+
+	// Cloudflare TURN integration validation
+	if conf.TURN.CloudflareEnabled {
+		if conf.TURN.CFTurnKeyID == "" || conf.TURN.CFAPIToken == "" {
+			return nil, fmt.Errorf("cloudflare TURN enabled but missing cf_turn_key_id or cf_api_token")
+		}
+		tokenPreview := "<empty>"
+		if len(conf.TURN.CFAPIToken) > 8 {
+			tokenPreview = conf.TURN.CFAPIToken[:8] + "..."
+		}
+		logger.Infow("Cloudflare TURN integration enabled", "turn_key_id", conf.TURN.CFTurnKeyID, "token", tokenPreview)
 	}
 
 	return &conf, nil
