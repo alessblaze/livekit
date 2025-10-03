@@ -24,6 +24,8 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/renderer"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/urfave/cli/v3"
 	"gopkg.in/yaml.v3"
 
@@ -183,10 +185,37 @@ func listNodes(_ context.Context, c *cli.Command) error {
 		return err
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetRowLine(true)
-	table.SetAutoWrapText(false)
-	table.SetHeader([]string{
+	table := tablewriter.NewTable(
+		os.Stdout,
+		tablewriter.WithRenderer(renderer.NewBlueprint(tw.Rendition{
+			Settings: tw.Settings{
+				Separators: tw.Separators{
+					BetweenRows: tw.On,
+				},
+			},
+		})),
+		tablewriter.WithConfig(tablewriter.Config{
+			Header: tw.CellConfig{
+				Alignment: tw.CellAlignment{Global: tw.AlignCenter},
+			},
+			Row: tw.CellConfig{
+				Formatting: tw.CellFormatting{AutoWrap: tw.WrapNone},
+				Alignment: tw.CellAlignment{
+					PerColumn: []tw.Align{
+						tw.AlignCenter, tw.AlignCenter, tw.AlignCenter,
+						tw.AlignRight, tw.AlignRight,
+						tw.AlignRight,
+						tw.AlignRight, tw.AlignRight,
+						tw.AlignRight, tw.AlignRight, tw.AlignRight,
+						tw.AlignRight, tw.AlignRight,
+						tw.AlignCenter,
+					},
+				},
+			},
+		}),
+	)
+
+	table.Header([]string{
 		"ID", "IP Address", "Region",
 		"CPUs", "CPU Usage\nLoad Avg",
 		"Memory Used/Total",
@@ -194,15 +223,6 @@ func listNodes(_ context.Context, c *cli.Command) error {
 		"Bytes/s In/Out\nBytes Total", "Packets/s In/Out\nPackets Total", "System Dropped Pkts/s\nPkts/s Out/Dropped",
 		"Nack/s\nNack Total", "Retrans/s\nRetrans Total",
 		"Started At\nUpdated At",
-	})
-	table.SetColumnAlignment([]int{
-		tablewriter.ALIGN_CENTER, tablewriter.ALIGN_CENTER, tablewriter.ALIGN_CENTER,
-		tablewriter.ALIGN_RIGHT, tablewriter.ALIGN_RIGHT,
-		tablewriter.ALIGN_RIGHT,
-		tablewriter.ALIGN_RIGHT, tablewriter.ALIGN_RIGHT,
-		tablewriter.ALIGN_RIGHT, tablewriter.ALIGN_RIGHT, tablewriter.ALIGN_RIGHT,
-		tablewriter.ALIGN_RIGHT, tablewriter.ALIGN_RIGHT,
-		tablewriter.ALIGN_CENTER,
 	})
 
 	for _, node := range nodes {
