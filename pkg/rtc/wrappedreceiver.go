@@ -60,7 +60,7 @@ func NewWrappedReceiver(params WrappedReceiverParams) *WrappedReceiver {
 	}
 
 	codecs := params.UpstreamCodecs
-	if len(codecs) == 1 && !params.IsEncrypted {
+	if len(codecs) == 1 {
 		normalizedMimeType := mime.NormalizeMimeType(codecs[0].MimeType)
 		if normalizedMimeType == mime.MimeTypeRED {
 			// if upstream is opus/red, then add opus to match clients that don't support red
@@ -88,8 +88,13 @@ func (r *WrappedReceiver) StreamID() string {
 	return r.params.StreamId
 }
 
-// DetermineReceiver determines the receiver of negotiated codec and return if there is a match
-func (r *WrappedReceiver) DetermineReceiver(codec webrtc.RTPCodecCapability) bool {
+// DetermineReceiver determines the receiver of negotiated codec and returns
+//
+// isAvailable: returns true if given codec is a potential codec from publisher or if an existing published codec can be translated
+// needsPublish: indicates if the codec is needed from publisher, some combinations can be achieved via codec translation internally,
+//
+//	example: unecrypted opus -> RED translation and vice-versa can be done without the need for publisher to send the other codec.
+func (r *WrappedReceiver) DetermineReceiver(codec webrtc.RTPCodecCapability) (isAvailable bool, needsPublish bool) {
 	r.lock.Lock()
 
 	codecMimeType := mime.NormalizeMimeType(codec.MimeType)
@@ -98,6 +103,8 @@ func (r *WrappedReceiver) DetermineReceiver(codec webrtc.RTPCodecCapability) boo
 		receiverMimeType := receiver.Mime()
 		if receiverMimeType == codecMimeType {
 			trackReceiver = receiver
+			isAvailable = true
+			needsPublish = true
 			break
 		}
 
@@ -105,9 +112,11 @@ func (r *WrappedReceiver) DetermineReceiver(codec webrtc.RTPCodecCapability) boo
 			if receiverMimeType == mime.MimeTypeRED && codecMimeType == mime.MimeTypeOpus {
 				// audio opus/red can match opus only
 				trackReceiver = receiver.GetPrimaryReceiverForRed()
+				isAvailable = true
 				break
 			} else if receiverMimeType == mime.MimeTypeOpus && codecMimeType == mime.MimeTypeRED {
 				trackReceiver = receiver.GetRedReceiver()
+				isAvailable = true
 				break
 			}
 		}
@@ -115,7 +124,7 @@ func (r *WrappedReceiver) DetermineReceiver(codec webrtc.RTPCodecCapability) boo
 	if trackReceiver == nil {
 		r.lock.Unlock()
 		r.params.Logger.Warnw("can't determine receiver for codec", nil, "codec", codec.MimeType)
-		return false
+		return
 	}
 	r.TrackReceiver = trackReceiver
 
@@ -127,7 +136,7 @@ func (r *WrappedReceiver) DetermineReceiver(codec webrtc.RTPCodecCapability) boo
 		trackReceiver.AddOnReady(f)
 	}
 
-	return true
+	return
 }
 
 func (r *WrappedReceiver) Codecs() []webrtc.RTPCodecParameters {
@@ -205,8 +214,10 @@ func (d *DummyReceiver) Upgrade(receiver sfu.TrackReceiver) {
 		receiver.AddDownTrack(t)
 	}
 	d.downTracks = make(map[livekit.ParticipantID]sfu.TrackSender)
+
 	onReadyCallbacks := d.onReadyCallbacks
 	d.onReadyCallbacks = nil
+
 	codecChange := d.onCodecStateChange
 	d.onCodecStateChange = nil
 	d.downTrackLock.Unlock()
@@ -220,16 +231,22 @@ func (d *DummyReceiver) Upgrade(receiver sfu.TrackReceiver) {
 	}
 
 	d.settingsLock.Lock()
-	if d.maxExpectedLayerValid {
-		receiver.SetMaxExpectedSpatialLayer(d.maxExpectedLayer)
-	}
+	maxExpectedLayerValid := d.maxExpectedLayerValid
 	d.maxExpectedLayerValid = false
 
-	if d.pausedValid {
+	pausedValid := d.pausedValid
+	d.pausedValid = false
+	d.settingsLock.Unlock()
+
+	if maxExpectedLayerValid {
+		receiver.SetMaxExpectedSpatialLayer(d.maxExpectedLayer)
+	}
+
+	if pausedValid {
 		receiver.SetUpTrackPaused(d.paused)
 	}
-	d.pausedValid = false
 
+	d.settingsLock.Lock()
 	if d.primaryReceiver != nil {
 		d.primaryReceiver.upgrade(receiver)
 	}
@@ -248,81 +265,89 @@ func (d *DummyReceiver) StreamID() string {
 }
 
 func (d *DummyReceiver) Codec() webrtc.RTPCodecParameters {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.Codec()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.Codec()
 	}
 	return d.codec
 }
 
 func (d *DummyReceiver) Mime() mime.MimeType {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.Mime()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.Mime()
 	}
 	return mime.NormalizeMimeType(d.codec.MimeType)
 }
 
 func (d *DummyReceiver) VideoLayerMode() livekit.VideoLayer_Mode {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.VideoLayerMode()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.VideoLayerMode()
 	}
 	return buffer.GetVideoLayerModeForMimeType(d.Mime(), d.TrackInfo())
 }
 
 func (d *DummyReceiver) HeaderExtensions() []webrtc.RTPHeaderExtensionParameter {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.HeaderExtensions()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.HeaderExtensions()
 	}
 	return d.headerExtensions
 }
 
 func (d *DummyReceiver) ReadRTP(buf []byte, layer uint8, esn uint64) (int, error) {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.ReadRTP(buf, layer, esn)
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.ReadRTP(buf, layer, esn)
 	}
 	return 0, errors.New("no receiver")
 }
 
 func (d *DummyReceiver) GetLayeredBitrate() ([]int32, sfu.Bitrates) {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.GetLayeredBitrate()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.GetLayeredBitrate()
 	}
 	return nil, sfu.Bitrates{}
 }
 
 func (d *DummyReceiver) GetAudioLevel() (float64, bool) {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.GetAudioLevel()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.GetAudioLevel()
 	}
 	return 0, false
 }
 
 func (d *DummyReceiver) SendPLI(layer int32, force bool) {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		r.SendPLI(layer, force)
+	if receiver := d.getReceiver(); receiver != nil {
+		receiver.SendPLI(layer, force)
 	}
 }
 
 func (d *DummyReceiver) SetUpTrackPaused(paused bool) {
 	d.settingsLock.Lock()
-	defer d.settingsLock.Unlock()
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
+	receiver := d.getReceiver()
+	if receiver != nil {
 		d.pausedValid = false
-		r.SetUpTrackPaused(paused)
 	} else {
 		d.pausedValid = true
 		d.paused = paused
+	}
+	d.settingsLock.Unlock()
+
+	if receiver != nil {
+		receiver.SetUpTrackPaused(paused)
 	}
 }
 
 func (d *DummyReceiver) SetMaxExpectedSpatialLayer(layer int32) {
 	d.settingsLock.Lock()
-	defer d.settingsLock.Unlock()
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
+	receiver := d.getReceiver()
+	if receiver != nil {
 		d.maxExpectedLayerValid = false
-		r.SetMaxExpectedSpatialLayer(layer)
 	} else {
 		d.maxExpectedLayerValid = true
 		d.maxExpectedLayer = layer
+	}
+	d.settingsLock.Unlock()
+
+	if receiver != nil {
+		receiver.SetMaxExpectedSpatialLayer(layer)
 	}
 }
 
@@ -330,8 +355,8 @@ func (d *DummyReceiver) AddDownTrack(track sfu.TrackSender) error {
 	d.downTrackLock.Lock()
 	defer d.downTrackLock.Unlock()
 
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		r.AddDownTrack(track)
+	if receiver := d.getReceiver(); receiver != nil {
+		receiver.AddDownTrack(track)
 	} else {
 		d.downTracks[track.SubscriberID()] = track
 	}
@@ -342,8 +367,8 @@ func (d *DummyReceiver) DeleteDownTrack(subscriberID livekit.ParticipantID) {
 	d.downTrackLock.Lock()
 	defer d.downTrackLock.Unlock()
 
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		r.DeleteDownTrack(subscriberID)
+	if receiver := d.getReceiver(); receiver != nil {
+		receiver.DeleteDownTrack(subscriberID)
 	} else {
 		delete(d.downTracks, subscriberID)
 	}
@@ -353,42 +378,42 @@ func (d *DummyReceiver) GetDownTracks() []sfu.TrackSender {
 	d.downTrackLock.Lock()
 	defer d.downTrackLock.Unlock()
 
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.GetDownTracks()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.GetDownTracks()
 	}
 	return maps.Values(d.downTracks)
 }
 
 func (d *DummyReceiver) DebugInfo() map[string]interface{} {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.DebugInfo()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.DebugInfo()
 	}
 	return nil
 }
 
 func (d *DummyReceiver) GetTemporalLayerFpsForSpatial(spatial int32) []float32 {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.GetTemporalLayerFpsForSpatial(spatial)
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.GetTemporalLayerFpsForSpatial(spatial)
 	}
 	return nil
 }
 
 func (d *DummyReceiver) TrackInfo() *livekit.TrackInfo {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.TrackInfo()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.TrackInfo()
 	}
 	return nil
 }
 
 func (d *DummyReceiver) UpdateTrackInfo(ti *livekit.TrackInfo) {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		r.UpdateTrackInfo(ti)
+	if receiver := d.getReceiver(); receiver != nil {
+		receiver.UpdateTrackInfo(ti)
 	}
 }
 
 func (d *DummyReceiver) IsClosed() bool {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.IsClosed()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.IsClosed()
 	}
 	return false
 }
@@ -419,18 +444,16 @@ func (d *DummyReceiver) GetRedReceiver() sfu.TrackReceiver {
 }
 
 func (d *DummyReceiver) GetTrackStats() *livekit.RTPStats {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.GetTrackStats()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.GetTrackStats()
 	}
 	return nil
 }
 
 func (d *DummyReceiver) AddOnReady(f func()) {
-	var receiver sfu.TrackReceiver
 	d.downTrackLock.Lock()
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		receiver = r
-	} else {
+	receiver := d.getReceiver()
+	if receiver == nil {
 		d.onReadyCallbacks = append(d.onReadyCallbacks, f)
 	}
 	d.downTrackLock.Unlock()
@@ -440,11 +463,9 @@ func (d *DummyReceiver) AddOnReady(f func()) {
 }
 
 func (d *DummyReceiver) AddOnCodecStateChange(f func(codec webrtc.RTPCodecParameters, state sfu.ReceiverCodecState)) {
-	var receiver sfu.TrackReceiver
 	d.downTrackLock.Lock()
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		receiver = r
-	} else {
+	receiver := d.getReceiver()
+	if receiver == nil {
 		d.onCodecStateChange = append(d.onCodecStateChange, f)
 	}
 	d.downTrackLock.Unlock()
@@ -454,15 +475,23 @@ func (d *DummyReceiver) AddOnCodecStateChange(f func(codec webrtc.RTPCodecParame
 }
 
 func (d *DummyReceiver) CodecState() sfu.ReceiverCodecState {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.CodecState()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.CodecState()
 	}
 	return sfu.ReceiverCodecStateNormal
 }
 
 func (d *DummyReceiver) VideoSizes() []buffer.VideoSize {
-	if r, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
-		return r.VideoSizes()
+	if receiver := d.getReceiver(); receiver != nil {
+		return receiver.VideoSizes()
+	}
+
+	return nil
+}
+
+func (d *DummyReceiver) getReceiver() sfu.TrackReceiver {
+	if receiver, ok := d.receiver.Load().(sfu.TrackReceiver); ok {
+		return receiver
 	}
 
 	return nil
