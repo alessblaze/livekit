@@ -413,7 +413,8 @@ func NewDownTrack(params DownTrackParams) (*DownTrack, error) {
 	d.forwarder = NewForwarder(
 		d.kind,
 		d.params.Logger,
-		false,
+		false, // skipReferenceTS
+		false, // disableOpportunisticAllocation
 		d.rtpStats,
 	)
 
@@ -847,6 +848,14 @@ func (d *DownTrack) setRTPHeaderExtensions() {
 			d.absCaptureTimeExtID = ext.ID
 		}
 	}
+	d.params.Logger.Debugw(
+		"negotiated extension ids",
+		"absSendTimeExtID", d.absSendTimeExtID,
+		"dependencyDescriptorExtID", d.dependencyDescriptorExtID,
+		"playoutDelayExtID", d.playoutDelayExtID,
+		"transportWideExtID", d.transportWideExtID,
+		"absCaptureTimeExtID", d.absCaptureTimeExtID,
+	)
 	d.bindLock.Unlock()
 }
 
