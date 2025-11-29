@@ -362,6 +362,7 @@ func (r *RoomManager) StartSession(
 						Leave: leave,
 					},
 				})
+				prometheus.IncrementParticipantRtcCanceled(1)
 				return errors.New("could not restart closed participant")
 			}
 
@@ -420,6 +421,7 @@ func (r *RoomManager) StartSession(
 				Leave: leave,
 			},
 		})
+		prometheus.IncrementParticipantRtcCanceled(1)
 		return errors.New("could not restart participant")
 	}
 
