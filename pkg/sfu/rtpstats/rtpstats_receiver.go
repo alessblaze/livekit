@@ -22,9 +22,9 @@ import (
 	"github.com/pion/rtcp"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/livekit/livekit-server/pkg/sfu/utils"
 	"github.com/livekit/mediatransportutil"
 	"github.com/livekit/mediatransportutil/pkg/latency"
+	"github.com/livekit/mediatransportutil/pkg/utils"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
 	protoutils "github.com/livekit/protocol/utils"
@@ -224,7 +224,7 @@ func (r *RTPStatsReceiver) Update(
 		//  Very old time stamp, happens under the following conditions
 		//  - resume after long mute, big time stamp jump
 		//  - an out of order packet from before the mute arrives (unsure what causes this
-		//    very old packet to be trasmitted from remote), causing time stamp to jump back
+		//    very old packet to be transmitted from remote), causing time stamp to jump back
 		//    to before mute, but it appears like it has rolled over.
 		//  Use a threshold against expected to ignore these.
 		if gapSN < 0 && gapTS > 0 {
