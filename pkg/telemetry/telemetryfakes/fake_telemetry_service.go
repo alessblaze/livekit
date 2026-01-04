@@ -4,7 +4,6 @@ package telemetryfakes
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/livekit/livekit-server/pkg/sfu/mime"
 	"github.com/livekit/livekit-server/pkg/telemetry"
@@ -170,11 +169,6 @@ type FakeTelemetryService struct {
 		arg1 context.Context
 		arg2 []*livekit.AnalyticsStat
 	}
-	SetWorkerCleanupWaitDurationStub        func(time.Duration)
-	setWorkerCleanupWaitDurationMutex       sync.RWMutex
-	setWorkerCleanupWaitDurationArgsForCall []struct {
-		arg1 time.Duration
-	}
 	TrackMaxSubscribedVideoQualityStub        func(context.Context, livekit.ParticipantID, *livekit.TrackInfo, mime.MimeType, livekit.VideoQuality)
 	trackMaxSubscribedVideoQualityMutex       sync.RWMutex
 	trackMaxSubscribedVideoQualityArgsForCall []struct {
@@ -209,13 +203,14 @@ type FakeTelemetryService struct {
 		arg3 livekit.ParticipantIdentity
 		arg4 *livekit.TrackInfo
 	}
-	TrackPublishedStub        func(context.Context, livekit.ParticipantID, livekit.ParticipantIdentity, *livekit.TrackInfo)
+	TrackPublishedStub        func(context.Context, livekit.ParticipantID, livekit.ParticipantIdentity, *livekit.TrackInfo, bool)
 	trackPublishedMutex       sync.RWMutex
 	trackPublishedArgsForCall []struct {
 		arg1 context.Context
 		arg2 livekit.ParticipantID
 		arg3 livekit.ParticipantIdentity
 		arg4 *livekit.TrackInfo
+		arg5 bool
 	}
 	TrackPublishedUpdateStub        func(context.Context, livekit.ParticipantID, *livekit.TrackInfo)
 	trackPublishedUpdateMutex       sync.RWMutex
@@ -1097,38 +1092,6 @@ func (fake *FakeTelemetryService) SendStatsArgsForCall(i int) (context.Context, 
 	return argsForCall.arg1, argsForCall.arg2
 }
 
-func (fake *FakeTelemetryService) SetWorkerCleanupWaitDuration(arg1 time.Duration) {
-	fake.setWorkerCleanupWaitDurationMutex.Lock()
-	fake.setWorkerCleanupWaitDurationArgsForCall = append(fake.setWorkerCleanupWaitDurationArgsForCall, struct {
-		arg1 time.Duration
-	}{arg1})
-	stub := fake.SetWorkerCleanupWaitDurationStub
-	fake.recordInvocation("SetWorkerCleanupWaitDuration", []interface{}{arg1})
-	fake.setWorkerCleanupWaitDurationMutex.Unlock()
-	if stub != nil {
-		fake.SetWorkerCleanupWaitDurationStub(arg1)
-	}
-}
-
-func (fake *FakeTelemetryService) SetWorkerCleanupWaitDurationCallCount() int {
-	fake.setWorkerCleanupWaitDurationMutex.RLock()
-	defer fake.setWorkerCleanupWaitDurationMutex.RUnlock()
-	return len(fake.setWorkerCleanupWaitDurationArgsForCall)
-}
-
-func (fake *FakeTelemetryService) SetWorkerCleanupWaitDurationCalls(stub func(time.Duration)) {
-	fake.setWorkerCleanupWaitDurationMutex.Lock()
-	defer fake.setWorkerCleanupWaitDurationMutex.Unlock()
-	fake.SetWorkerCleanupWaitDurationStub = stub
-}
-
-func (fake *FakeTelemetryService) SetWorkerCleanupWaitDurationArgsForCall(i int) time.Duration {
-	fake.setWorkerCleanupWaitDurationMutex.RLock()
-	defer fake.setWorkerCleanupWaitDurationMutex.RUnlock()
-	argsForCall := fake.setWorkerCleanupWaitDurationArgsForCall[i]
-	return argsForCall.arg1
-}
-
 func (fake *FakeTelemetryService) TrackMaxSubscribedVideoQuality(arg1 context.Context, arg2 livekit.ParticipantID, arg3 *livekit.TrackInfo, arg4 mime.MimeType, arg5 livekit.VideoQuality) {
 	fake.trackMaxSubscribedVideoQualityMutex.Lock()
 	fake.trackMaxSubscribedVideoQualityArgsForCall = append(fake.trackMaxSubscribedVideoQualityArgsForCall, struct {
@@ -1271,19 +1234,20 @@ func (fake *FakeTelemetryService) TrackPublishRequestedArgsForCall(i int) (conte
 	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
 }
 
-func (fake *FakeTelemetryService) TrackPublished(arg1 context.Context, arg2 livekit.ParticipantID, arg3 livekit.ParticipantIdentity, arg4 *livekit.TrackInfo) {
+func (fake *FakeTelemetryService) TrackPublished(arg1 context.Context, arg2 livekit.ParticipantID, arg3 livekit.ParticipantIdentity, arg4 *livekit.TrackInfo, arg5 bool) {
 	fake.trackPublishedMutex.Lock()
 	fake.trackPublishedArgsForCall = append(fake.trackPublishedArgsForCall, struct {
 		arg1 context.Context
 		arg2 livekit.ParticipantID
 		arg3 livekit.ParticipantIdentity
 		arg4 *livekit.TrackInfo
-	}{arg1, arg2, arg3, arg4})
+		arg5 bool
+	}{arg1, arg2, arg3, arg4, arg5})
 	stub := fake.TrackPublishedStub
-	fake.recordInvocation("TrackPublished", []interface{}{arg1, arg2, arg3, arg4})
+	fake.recordInvocation("TrackPublished", []interface{}{arg1, arg2, arg3, arg4, arg5})
 	fake.trackPublishedMutex.Unlock()
 	if stub != nil {
-		fake.TrackPublishedStub(arg1, arg2, arg3, arg4)
+		fake.TrackPublishedStub(arg1, arg2, arg3, arg4, arg5)
 	}
 }
 
@@ -1293,17 +1257,17 @@ func (fake *FakeTelemetryService) TrackPublishedCallCount() int {
 	return len(fake.trackPublishedArgsForCall)
 }
 
-func (fake *FakeTelemetryService) TrackPublishedCalls(stub func(context.Context, livekit.ParticipantID, livekit.ParticipantIdentity, *livekit.TrackInfo)) {
+func (fake *FakeTelemetryService) TrackPublishedCalls(stub func(context.Context, livekit.ParticipantID, livekit.ParticipantIdentity, *livekit.TrackInfo, bool)) {
 	fake.trackPublishedMutex.Lock()
 	defer fake.trackPublishedMutex.Unlock()
 	fake.TrackPublishedStub = stub
 }
 
-func (fake *FakeTelemetryService) TrackPublishedArgsForCall(i int) (context.Context, livekit.ParticipantID, livekit.ParticipantIdentity, *livekit.TrackInfo) {
+func (fake *FakeTelemetryService) TrackPublishedArgsForCall(i int) (context.Context, livekit.ParticipantID, livekit.ParticipantIdentity, *livekit.TrackInfo, bool) {
 	fake.trackPublishedMutex.RLock()
 	defer fake.trackPublishedMutex.RUnlock()
 	argsForCall := fake.trackPublishedArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5
 }
 
 func (fake *FakeTelemetryService) TrackPublishedUpdate(arg1 context.Context, arg2 livekit.ParticipantID, arg3 *livekit.TrackInfo) {

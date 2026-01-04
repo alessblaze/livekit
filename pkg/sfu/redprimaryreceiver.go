@@ -141,6 +141,12 @@ func (r *RedPrimaryReceiver) ResyncDownTracks() {
 	})
 }
 
+func (r *RedPrimaryReceiver) OnStreamRestart() {
+	r.downTrackSpreader.Broadcast(func(dt TrackSender) {
+		dt.ReceiverRestart()
+	})
+}
+
 func (r *RedPrimaryReceiver) IsClosed() bool {
 	return r.closed.Load()
 }
@@ -205,7 +211,7 @@ func (r *RedPrimaryReceiver) getSendPktsFromRed(rtp *rtp.Packet) ([]*rtp.Packet,
 	var recoverBits byte
 	if needRecover {
 		bitIndex := r.lastSeq - rtp.SequenceNumber
-		for i := 0; i < maxRedCount; i++ {
+		for i := range maxRedCount {
 			if bitIndex > 7 {
 				break
 			}

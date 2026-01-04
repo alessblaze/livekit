@@ -24,7 +24,6 @@ import (
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/webhook"
-	"go.uber.org/atomic"
 )
 
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate
@@ -48,7 +47,7 @@ type TelemetryService interface {
 	// TrackPublishRequested - a publication attempt has been received
 	TrackPublishRequested(ctx context.Context, participantID livekit.ParticipantID, identity livekit.ParticipantIdentity, track *livekit.TrackInfo)
 	// TrackPublished - a publication attempt has been successful
-	TrackPublished(ctx context.Context, participantID livekit.ParticipantID, identity livekit.ParticipantIdentity, track *livekit.TrackInfo)
+	TrackPublished(ctx context.Context, participantID livekit.ParticipantID, identity livekit.ParticipantIdentity, track *livekit.TrackInfo, shouldSendEvent bool)
 	// TrackUnpublished - a participant unpublished a track
 	TrackUnpublished(ctx context.Context, participantID livekit.ParticipantID, identity livekit.ParticipantIdentity, track *livekit.TrackInfo, shouldSendEvent bool)
 	// TrackSubscribeRequested - a participant requested to subscribe to a track
@@ -86,8 +85,70 @@ type TelemetryService interface {
 	AnalyticsService
 	NotifyEgressEvent(ctx context.Context, event string, info *livekit.EgressInfo)
 	FlushStats()
-	SetWorkerCleanupWaitDuration(wait time.Duration)
 }
+
+// -----------------------------
+
+var _ TelemetryService = (*NullTelemetryService)(nil)
+
+type NullTelemetryService struct {
+	NullAnalyticService
+}
+
+func (n NullTelemetryService) TrackStats(key StatsKey, stat *livekit.AnalyticsStat) {}
+func (n NullTelemetryService) RoomStarted(ctx context.Context, room *livekit.Room)  {}
+func (n NullTelemetryService) RoomEnded(ctx context.Context, room *livekit.Room)    {}
+func (n NullTelemetryService) ParticipantJoined(ctx context.Context, room *livekit.Room, participant *livekit.ParticipantInfo, clientInfo *livekit.ClientInfo, clientMeta *livekit.AnalyticsClientMeta, shouldSendEvent bool, guard *ReferenceGuard) {
+}
+func (n NullTelemetryService) ParticipantActive(ctx context.Context, room *livekit.Room, participant *livekit.ParticipantInfo, clientMeta *livekit.AnalyticsClientMeta, isMigration bool, guard *ReferenceGuard) {
+}
+func (n NullTelemetryService) ParticipantResumed(ctx context.Context, room *livekit.Room, participant *livekit.ParticipantInfo, nodeID livekit.NodeID, reason livekit.ReconnectReason) {
+}
+func (n NullTelemetryService) ParticipantLeft(ctx context.Context, room *livekit.Room, participant *livekit.ParticipantInfo, shouldSendEvent bool, guard *ReferenceGuard) {
+}
+func (n NullTelemetryService) TrackPublishRequested(ctx context.Context, participantID livekit.ParticipantID, identity livekit.ParticipantIdentity, track *livekit.TrackInfo) {
+}
+func (n NullTelemetryService) TrackPublished(ctx context.Context, participantID livekit.ParticipantID, identity livekit.ParticipantIdentity, track *livekit.TrackInfo, shouldSendEvent bool) {
+}
+func (n NullTelemetryService) TrackUnpublished(ctx context.Context, participantID livekit.ParticipantID, identity livekit.ParticipantIdentity, track *livekit.TrackInfo, shouldSendEvent bool) {
+}
+func (n NullTelemetryService) TrackSubscribeRequested(ctx context.Context, participantID livekit.ParticipantID, track *livekit.TrackInfo) {
+}
+func (n NullTelemetryService) TrackSubscribed(ctx context.Context, participantID livekit.ParticipantID, track *livekit.TrackInfo, publisher *livekit.ParticipantInfo, shouldSendEvent bool) {
+}
+func (n NullTelemetryService) TrackUnsubscribed(ctx context.Context, participantID livekit.ParticipantID, track *livekit.TrackInfo, shouldSendEvent bool) {
+}
+func (n NullTelemetryService) TrackSubscribeFailed(ctx context.Context, participantID livekit.ParticipantID, trackID livekit.TrackID, err error, isUserError bool) {
+}
+func (n NullTelemetryService) TrackMuted(ctx context.Context, participantID livekit.ParticipantID, track *livekit.TrackInfo) {
+}
+func (n NullTelemetryService) TrackUnmuted(ctx context.Context, participantID livekit.ParticipantID, track *livekit.TrackInfo) {
+}
+func (n NullTelemetryService) TrackPublishedUpdate(ctx context.Context, participantID livekit.ParticipantID, track *livekit.TrackInfo) {
+}
+func (n NullTelemetryService) TrackMaxSubscribedVideoQuality(ctx context.Context, participantID livekit.ParticipantID, track *livekit.TrackInfo, mime mime.MimeType, maxQuality livekit.VideoQuality) {
+}
+func (n NullTelemetryService) TrackPublishRTPStats(ctx context.Context, participantID livekit.ParticipantID, trackID livekit.TrackID, mimeType mime.MimeType, layer int, stats *livekit.RTPStats) {
+}
+func (n NullTelemetryService) TrackSubscribeRTPStats(ctx context.Context, participantID livekit.ParticipantID, trackID livekit.TrackID, mimeType mime.MimeType, stats *livekit.RTPStats) {
+}
+func (n NullTelemetryService) EgressStarted(ctx context.Context, info *livekit.EgressInfo)          {}
+func (n NullTelemetryService) EgressUpdated(ctx context.Context, info *livekit.EgressInfo)          {}
+func (n NullTelemetryService) EgressEnded(ctx context.Context, info *livekit.EgressInfo)            {}
+func (n NullTelemetryService) IngressCreated(ctx context.Context, info *livekit.IngressInfo)        {}
+func (n NullTelemetryService) IngressDeleted(ctx context.Context, info *livekit.IngressInfo)        {}
+func (n NullTelemetryService) IngressStarted(ctx context.Context, info *livekit.IngressInfo)        {}
+func (n NullTelemetryService) IngressUpdated(ctx context.Context, info *livekit.IngressInfo)        {}
+func (n NullTelemetryService) IngressEnded(ctx context.Context, info *livekit.IngressInfo)          {}
+func (n NullTelemetryService) LocalRoomState(ctx context.Context, info *livekit.AnalyticsNodeRooms) {}
+func (n NullTelemetryService) Report(ctx context.Context, reportInfo *livekit.ReportInfo)           {}
+func (n NullTelemetryService) APICall(ctx context.Context, apiCallInfo *livekit.APICallInfo)        {}
+func (n NullTelemetryService) Webhook(ctx context.Context, webhookInfo *livekit.WebhookInfo)        {}
+func (n NullTelemetryService) NotifyEgressEvent(ctx context.Context, event string, info *livekit.EgressInfo) {
+}
+func (n NullTelemetryService) FlushStats() {}
+
+// -----------------------------
 
 const (
 	workerCleanupWait = 3 * time.Minute
@@ -107,8 +168,6 @@ type telemetryService struct {
 	workerList *StatsWorker
 
 	flushMu sync.Mutex
-
-	workerCleanupWait atomic.Duration
 }
 
 func NewTelemetryService(notifier webhook.QueuedNotifier, analytics AnalyticsService) TelemetryService {
@@ -123,7 +182,6 @@ func NewTelemetryService(notifier webhook.QueuedNotifier, analytics AnalyticsSer
 		}),
 		workers: make(map[livekit.ParticipantID]*StatsWorker),
 	}
-	t.workerCleanupWait.Store(workerCleanupWait)
 	if t.notifier != nil {
 		t.notifier.RegisterProcessedHook(func(ctx context.Context, whi *livekit.WebhookInfo) {
 			t.Webhook(ctx, whi)
@@ -148,7 +206,7 @@ func (t *telemetryService) FlushStats() {
 	var prev, reap *StatsWorker
 	for worker != nil {
 		next := worker.next
-		if closed := worker.Flush(now, t.workerCleanupWait.Load()); closed {
+		if closed := worker.Flush(now, workerCleanupWait); closed {
 			if prev == nil {
 				// this worker was at the head of the list
 				t.workersMu.Lock()
@@ -183,10 +241,6 @@ func (t *telemetryService) FlushStats() {
 		}
 		t.workersMu.Unlock()
 	}
-}
-
-func (t *telemetryService) SetWorkerCleanupWaitDuration(wait time.Duration) {
-	t.workerCleanupWait.Store(max(workerCleanupWait, wait))
 }
 
 func (t *telemetryService) run() {

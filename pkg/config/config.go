@@ -130,6 +130,9 @@ type RTCConfig struct {
 	DatachannelLossyTargetLatency time.Duration `yaml:"datachannel_lossy_target_latency,omitempty"`
 
 	ForwardStats ForwardStatsConfig `yaml:"forward_stats,omitempty"`
+
+	// enable rtp stream restart detection for published tracks
+	EnableRTPStreamRestartDetection bool `yaml:"enable_rtp_stream_restart_detection,omitempty"`
 }
 
 type TURNServer struct {
@@ -138,6 +141,12 @@ type TURNServer struct {
 	Protocol   string `yaml:"protocol,omitempty"`
 	Username   string `yaml:"username,omitempty"`
 	Credential string `yaml:"credential,omitempty"`
+	// Secret is used for TURN static auth secrets mechanism. When provided,
+	// dynamic credentials are generated using HMAC-SHA1 instead of static Username/Credential
+	Secret string `yaml:"secret,omitempty"`
+	// TTL is the time-to-live in seconds for generated credentials when using Secret.
+	// Defaults to 14400 seconds (4 hours) if not specified
+	TTL int `yaml:"ttl,omitempty"`
 }
 
 type CongestionControlConfig struct {
@@ -788,7 +797,7 @@ func (conf *Config) updateFromCLI(c *cli.Command, baseFlags []cli.Flag) error {
 }
 
 func (conf *Config) unmarshalKeys(keys string) error {
-	temp := make(map[string]interface{})
+	temp := make(map[string]any)
 	if err := yaml.Unmarshal([]byte(keys), temp); err != nil {
 		return err
 	}

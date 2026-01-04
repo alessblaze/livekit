@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"slices"
 	"strings"
@@ -59,6 +60,7 @@ import (
 	"github.com/livekit/livekit-server/pkg/sfu"
 	"github.com/livekit/livekit-server/pkg/sfu/buffer"
 	"github.com/livekit/livekit-server/pkg/sfu/connectionquality"
+	"github.com/livekit/livekit-server/pkg/sfu/interceptor"
 	"github.com/livekit/livekit-server/pkg/sfu/mime"
 	"github.com/livekit/livekit-server/pkg/sfu/pacer"
 	"github.com/livekit/livekit-server/pkg/sfu/streamallocator"
@@ -172,53 +174,54 @@ type ParticipantParams struct {
 	PLIThrottleConfig       sfu.PLIThrottleConfig
 	CongestionControlConfig config.CongestionControlConfig
 	// codecs that are enabled for this room
-	PublishEnabledCodecs           []*livekit.Codec
-	SubscribeEnabledCodecs         []*livekit.Codec
-	Logger                         logger.Logger
-	LoggerResolver                 logger.DeferredFieldResolver
-	Reporter                       roomobs.ParticipantSessionReporter
-	ReporterResolver               roomobs.ParticipantReporterResolver
-	SimTracks                      map[uint32]SimulcastTrackInfo
-	Grants                         *auth.ClaimGrants
-	InitialVersion                 uint32
-	ClientConf                     *livekit.ClientConfiguration
-	ClientInfo                     ClientInfo
-	Region                         string
-	Migration                      bool
-	Reconnect                      bool
-	AdaptiveStream                 bool
-	AllowTCPFallback               bool
-	TCPFallbackRTTThreshold        int
-	AllowUDPUnstableFallback       bool
-	TURNSEnabled                   bool
-	ParticipantListener            types.LocalParticipantListener
-	ParticipantHelper              types.LocalParticipantHelper
-	DisableSupervisor              bool
-	ReconnectOnPublicationError    bool
-	ReconnectOnSubscriptionError   bool
-	ReconnectOnDataChannelError    bool
-	VersionGenerator               utils.TimedVersionGenerator
-	DisableDynacast                bool
-	SubscriberAllowPause           bool
-	SubscriptionLimitAudio         int32
-	SubscriptionLimitVideo         int32
-	PlayoutDelay                   *livekit.PlayoutDelay
-	SyncStreams                    bool
-	ForwardStats                   *sfu.ForwardStats
-	DisableSenderReportPassThrough bool
-	MetricConfig                   metric.MetricConfig
-	UseOneShotSignallingMode       bool
-	EnableMetrics                  bool
-	DataChannelMaxBufferedAmount   uint64
-	DatachannelSlowThreshold       int
-	DatachannelLossyTargetLatency  time.Duration
-	FireOnTrackBySdp               bool
-	DisableCodecRegression         bool
-	LastPubReliableSeq             uint32
-	Country                        string
-	PreferVideoSizeFromMedia       bool
-	UseSinglePeerConnection        bool
-	EnableDataTracks               bool
+	PublishEnabledCodecs            []*livekit.Codec
+	SubscribeEnabledCodecs          []*livekit.Codec
+	Logger                          logger.Logger
+	LoggerResolver                  logger.DeferredFieldResolver
+	Reporter                        roomobs.ParticipantSessionReporter
+	ReporterResolver                roomobs.ParticipantReporterResolver
+	SimTracks                       map[uint32]interceptor.SimulcastTrackInfo
+	Grants                          *auth.ClaimGrants
+	InitialVersion                  uint32
+	ClientConf                      *livekit.ClientConfiguration
+	ClientInfo                      ClientInfo
+	Region                          string
+	Migration                       bool
+	Reconnect                       bool
+	AdaptiveStream                  bool
+	AllowTCPFallback                bool
+	TCPFallbackRTTThreshold         int
+	AllowUDPUnstableFallback        bool
+	TURNSEnabled                    bool
+	ParticipantListener             types.LocalParticipantListener
+	ParticipantHelper               types.LocalParticipantHelper
+	DisableSupervisor               bool
+	ReconnectOnPublicationError     bool
+	ReconnectOnSubscriptionError    bool
+	ReconnectOnDataChannelError     bool
+	VersionGenerator                utils.TimedVersionGenerator
+	DisableDynacast                 bool
+	SubscriberAllowPause            bool
+	SubscriptionLimitAudio          int32
+	SubscriptionLimitVideo          int32
+	PlayoutDelay                    *livekit.PlayoutDelay
+	SyncStreams                     bool
+	ForwardStats                    *sfu.ForwardStats
+	DisableSenderReportPassThrough  bool
+	MetricConfig                    metric.MetricConfig
+	UseOneShotSignallingMode        bool
+	EnableMetrics                   bool
+	DataChannelMaxBufferedAmount    uint64
+	DatachannelSlowThreshold        int
+	DatachannelLossyTargetLatency   time.Duration
+	FireOnTrackBySdp                bool
+	DisableCodecRegression          bool
+	LastPubReliableSeq              uint32
+	Country                         string
+	PreferVideoSizeFromMedia        bool
+	UseSinglePeerConnection         bool
+	EnableDataTracks                bool
+	EnableRTPStreamRestartDetection bool
 }
 
 type ParticipantImpl struct {
@@ -269,6 +272,8 @@ type ParticipantImpl struct {
 	*UpTrackManager
 	*UpDataTrackManager
 	*SubscriptionManager
+
+	nextSubscribedDataTrackHandle uint16
 
 	icQueue [2]atomic.Pointer[webrtc.ICECandidate]
 
@@ -357,10 +362,11 @@ func NewParticipant(params ParticipantParams) (*ParticipantImpl, error) {
 			joiningMessageFirstSeqs:       make(map[livekit.ParticipantID]uint32),
 			joiningMessageLastWrittenSeqs: make(map[livekit.ParticipantID]uint32),
 		},
-		rpcPendingAcks:      make(map[string]*utils.DataChannelRpcPendingAckHandler),
-		rpcPendingResponses: make(map[string]*utils.DataChannelRpcPendingResponseHandler),
-		onClose:             make(map[string]func(types.LocalParticipant)),
-		telemetryGuard:      &telemetry.ReferenceGuard{},
+		rpcPendingAcks:                make(map[string]*utils.DataChannelRpcPendingAckHandler),
+		rpcPendingResponses:           make(map[string]*utils.DataChannelRpcPendingResponseHandler),
+		onClose:                       make(map[string]func(types.LocalParticipant)),
+		telemetryGuard:                &telemetry.ReferenceGuard{},
+		nextSubscribedDataTrackHandle: uint16(rand.Intn(256)),
 	}
 	p.setupSignalling()
 
@@ -386,7 +392,7 @@ func NewParticipant(params ParticipantParams) (*ParticipantImpl, error) {
 
 	p.state.Store(livekit.ParticipantInfo_JOINING)
 	p.grants.Store(params.Grants.Clone())
-	p.SetResponseSink(params.Sink)
+	p.SwapResponseSink(params.Sink, types.SignallingCloseReasonUnknown)
 	p.setupEnabledCodecs(params.PublishEnabledCodecs, params.SubscribeEnabledCodecs, params.ClientConf.GetDisabledCodecs())
 
 	if p.supervisor != nil {
@@ -404,7 +410,7 @@ func NewParticipant(params ParticipantParams) (*ParticipantImpl, error) {
 		tx.ReportDuration(uint16(millis))
 		tx.ReportDurationMinutes(uint8(mins))
 
-		return !p.IsDisconnected()
+		return !p.IsClosed()
 	})
 
 	var err error
@@ -561,6 +567,14 @@ func (p *ParticipantImpl) IsIdle() bool {
 
 func (p *ParticipantImpl) ConnectedAt() time.Time {
 	return p.connectedAt
+}
+
+func (p *ParticipantImpl) ActiveAt() time.Time {
+	if activeAt := p.lastActiveAt.Load(); activeAt != nil {
+		return *activeAt
+	}
+
+	return time.Time{}
 }
 
 func (p *ParticipantImpl) GetClientInfo() *livekit.ClientInfo {
@@ -975,7 +989,7 @@ func (p *ParticipantImpl) synthesizeAddTrackRequests(parsedOffer *sdp.SessionDes
 			if ridsOk {
 				// add simulcast layers, NOTE: only quality can be set as dimensions/fps is not available
 				n := min(len(rids), int(buffer.DefaultMaxLayerSpatial)+1)
-				for i := 0; i < n; i++ {
+				for i := range n {
 					// WARN: casting int -> protobuf enum
 					req.Layers = append(req.Layers, &livekit.VideoLayer{Quality: livekit.VideoQuality(i)})
 				}
@@ -1018,7 +1032,7 @@ func (p *ParticipantImpl) updateRidsFromSDP(parsed *sdp.SessionDescription, unma
 				}
 				outRids = buffer.NormalizeVideoLayersRid(outRids)
 			} else {
-				for i := 0; i < len(inRids); i++ {
+				for i := range len(inRids) {
 					outRids[i] = ""
 				}
 			}
@@ -1315,7 +1329,14 @@ func (p *ParticipantImpl) SetMigrateInfo(
 
 	for _, t := range dataTracks {
 		dti := t.GetInfo()
-		dt := NewDataTrack(DataTrackParams{Logger: p.params.Logger.WithValues("trackID", dti.Sid)}, dti)
+		dt := NewDataTrack(
+			DataTrackParams{
+				Logger:              p.params.Logger.WithValues("trackID", dti.Sid),
+				ParticipantID:       p.ID,
+				ParticipantIdentity: p.params.Identity,
+			},
+			dti,
+		)
 		p.UpDataTrackManager.AddPublishedDataTrack(dt)
 	}
 
@@ -1822,8 +1843,8 @@ func (h PublisherTransportHandler) OnDataMessageUnlabeled(data []byte) {
 	h.p.onReceivedDataMessageUnlabeled(data)
 }
 
-func (h PublisherTransportHandler) OnDataTrackMessage(data []byte) {
-	h.p.onReceivedDataTrackMessage(data)
+func (h PublisherTransportHandler) OnDataTrackMessage(data []byte, arrivalTime int64) {
+	h.p.onReceivedDataTrackMessage(data, arrivalTime)
 }
 
 func (h PublisherTransportHandler) OnDataSendError(err error) {
@@ -2194,7 +2215,8 @@ func (p *ParticipantImpl) onMediaTrack(rtcTrack *webrtc.TrackRemote, rtpReceiver
 			"kind", track.Kind().String(),
 			"webrtcTrackID", track.ID(),
 			"rid", track.RID(),
-			"SSRC", track.SSRC(),
+			"ssrc", track.SSRC(),
+			"rtxSsrc", track.RtxSSRC(),
 			"mime", mime.NormalizeMimeType(codec.MimeType),
 			"isReceiverAdded", isReceiverAdded,
 			"sdpRids", logger.StringSlice(sdpRids[:]),
@@ -2210,6 +2232,12 @@ func (p *ParticipantImpl) onMediaTrack(rtcTrack *webrtc.TrackRemote, rtpReceiver
 		return
 	}
 
+	p.TransportManager.RTPStreamPublished(
+		uint32(track.SSRC()),
+		p.TransportManager.GetPublisherMid(rtpReceiver),
+		track.RID(),
+	)
+
 	p.setIsPublisher(true)
 	p.dirty.Store(true)
 
@@ -2219,7 +2247,8 @@ func (p *ParticipantImpl) onMediaTrack(rtcTrack *webrtc.TrackRemote, rtpReceiver
 		"trackID", publishedTrack.ID(),
 		"webrtcTrackID", track.ID(),
 		"rid", track.RID(),
-		"SSRC", track.SSRC(),
+		"ssrc", track.SSRC(),
+		"rtxSsrc", track.RtxSSRC(),
 		"mime", mime.NormalizeMimeType(codec.MimeType),
 		"trackInfo", logger.Proto(publishedTrack.ToProto()),
 		"fromSdp", fromSdp,
@@ -2448,7 +2477,7 @@ func (p *ParticipantImpl) handleReceivedDataMessage(kind livekit.DataPacket_Kind
 	}
 
 	if shouldForwardData {
-		p.listener().OnDataPacket(p, kind, dp)
+		p.listener().OnDataMessage(p, kind, dp)
 	}
 	if shouldForwardMetrics {
 		p.listener().OnMetrics(p, dp)
@@ -2462,7 +2491,7 @@ func (p *ParticipantImpl) onReceivedDataMessageUnlabeled(data []byte) {
 
 	p.dataChannelStats.AddBytes(uint64(len(data)), false)
 
-	p.listener().OnDataMessage(p, data)
+	p.listener().OnDataMessageUnlabeled(p, data)
 }
 
 func (p *ParticipantImpl) onICECandidate(c *webrtc.ICECandidate, target livekit.SignalTarget) error {
@@ -3042,12 +3071,10 @@ func (p *ParticipantImpl) setTrackMuted(mute *livekit.MuteTrackRequest, fromAdmi
 	return trackInfo
 }
 
-func (p *ParticipantImpl) mediaTrackReceived(track sfu.TrackRemote, rtpReceiver *webrtc.RTPReceiver) (
-	*MediaTrack,
-	bool,
-	bool,
-	buffer.VideoLayersRid,
-) {
+func (p *ParticipantImpl) mediaTrackReceived(
+	track sfu.TrackRemote,
+	rtpReceiver *webrtc.RTPReceiver,
+) (*MediaTrack, bool, bool, buffer.VideoLayersRid) {
 	p.pendingTracksLock.Lock()
 	newTrack := false
 
@@ -3057,7 +3084,8 @@ func (p *ParticipantImpl) mediaTrackReceived(track sfu.TrackRemote, rtpReceiver 
 		"kind", track.Kind().String(),
 		"trackID", track.ID(),
 		"rid", track.RID(),
-		"SSRC", track.SSRC(),
+		"ssrc", track.SSRC(),
+		"rtxSsrc", track.RtxSSRC(),
 		"mime", mime.NormalizeMimeType(track.Codec().MimeType),
 		"mid", mid,
 	)
@@ -3225,8 +3253,8 @@ func (p *ParticipantImpl) addMigratedTrack(cid string, ti *livekit.TrackInfo) *M
 
 	for _, codec := range ti.Codecs {
 		for ssrc, info := range p.params.SimTracks {
-			if info.Mid == codec.Mid {
-				mt.SetLayerSsrc(mime.NormalizeMimeType(codec.MimeType), info.Rid, ssrc)
+			if info.Mid == codec.Mid && !info.IsRepairStream {
+				mt.SetLayerSsrcsForRid(mime.NormalizeMimeType(codec.MimeType), info.StreamID, ssrc, info.RepairSSRC)
 			}
 		}
 	}
@@ -3256,7 +3284,9 @@ func (p *ParticipantImpl) addMediaTrack(signalCid string, ti *livekit.TrackInfo)
 		ShouldRegressCodec: func() bool {
 			return p.helper().ShouldRegressCodec()
 		},
-		PreferVideoSizeFromMedia: p.params.PreferVideoSizeFromMedia,
+		PreferVideoSizeFromMedia:         p.params.PreferVideoSizeFromMedia,
+		EnableRTPStreamRestartDetection:  p.params.EnableRTPStreamRestartDetection,
+		UpdateTrackInfoByVideoSizeChange: p.params.UseOneShotSignallingMode,
 	}, ti)
 
 	mt.OnSubscribedMaxQualityChange(p.onSubscribedMaxQualityChange)
@@ -3293,15 +3323,13 @@ func (p *ParticipantImpl) addMediaTrack(signalCid string, ti *livekit.TrackInfo)
 			p.supervisor.ClearPublishedTrack(trackID, mt)
 		}
 
-		if !isExpectedToResume {
-			p.params.Telemetry.TrackUnpublished(
-				context.Background(),
-				p.ID(),
-				p.Identity(),
-				mt.ToProto(),
-				true,
-			)
-		}
+		p.params.Telemetry.TrackUnpublished(
+			context.Background(),
+			p.ID(),
+			p.Identity(),
+			mt.ToProto(),
+			!isExpectedToResume,
+		)
 
 		p.pendingTracksLock.Lock()
 		if pti := p.pendingTracks[signalCid]; pti != nil {
@@ -3330,14 +3358,13 @@ func (p *ParticipantImpl) handleTrackPublished(track types.MediaTrack, isMigrate
 
 	// send webhook after callbacks are complete, persistence and state handling happens
 	// in `onTrackPublished` cb
-	if !isMigrated {
-		p.params.Telemetry.TrackPublished(
-			context.Background(),
-			p.ID(),
-			p.Identity(),
-			track.ToProto(),
-		)
-	}
+	p.params.Telemetry.TrackPublished(
+		context.Background(),
+		p.ID(),
+		p.Identity(),
+		track.ToProto(),
+		!isMigrated,
+	)
 
 	p.pendingTracksLock.Lock()
 	delete(p.pendingPublishingTracks, track.ID())
@@ -3478,13 +3505,13 @@ func (p *ParticipantImpl) getPublishedTrackBySdpCid(clientId string) types.Media
 	return nil
 }
 
-func (p *ParticipantImpl) DebugInfo() map[string]interface{} {
-	info := map[string]interface{}{
+func (p *ParticipantImpl) DebugInfo() map[string]any {
+	info := map[string]any{
 		"ID":    p.ID(),
 		"State": p.State().String(),
 	}
 
-	pendingTrackInfo := make(map[string]interface{})
+	pendingTrackInfo := make(map[string]any)
 	p.pendingTracksLock.RLock()
 	for clientID, pti := range p.pendingTracks {
 		var trackInfos []string
@@ -3492,7 +3519,7 @@ func (p *ParticipantImpl) DebugInfo() map[string]interface{} {
 			trackInfos = append(trackInfos, ti.String())
 		}
 
-		pendingTrackInfo[clientID] = map[string]interface{}{
+		pendingTrackInfo[clientID] = map[string]any{
 			"TrackInfos": trackInfos,
 			"Migrated":   pti.migrated,
 		}
