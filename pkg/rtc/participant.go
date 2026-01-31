@@ -39,6 +39,7 @@ import (
 
 	"github.com/livekit/mediatransportutil/pkg/twcc"
 	"github.com/livekit/protocol/auth"
+	"github.com/livekit/protocol/codecs/mime"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/observability"
@@ -61,7 +62,6 @@ import (
 	"github.com/livekit/livekit-server/pkg/sfu/buffer"
 	"github.com/livekit/livekit-server/pkg/sfu/connectionquality"
 	"github.com/livekit/livekit-server/pkg/sfu/interceptor"
-	"github.com/livekit/livekit-server/pkg/sfu/mime"
 	"github.com/livekit/livekit-server/pkg/sfu/pacer"
 	"github.com/livekit/livekit-server/pkg/sfu/streamallocator"
 	"github.com/livekit/livekit-server/pkg/telemetry"
@@ -222,6 +222,7 @@ type ParticipantParams struct {
 	UseSinglePeerConnection         bool
 	EnableDataTracks                bool
 	EnableRTPStreamRestartDetection bool
+	ForceBackupCodecPolicySimulcast bool
 }
 
 type ParticipantImpl struct {
@@ -281,7 +282,7 @@ type ParticipantImpl struct {
 	// queued participant updates before join response is sent
 	// guarded by updateLock
 	queuedUpdates []*livekit.ParticipantInfo
-	// cache of recently sent updates, to ensuring ordering by version
+	// cache of recently sent updates, to ensure ordering by version
 	// guarded by updateLock
 	updateCache *lru.Cache[livekit.ParticipantID, participantUpdateInfo]
 	updateLock  utils.Mutex
@@ -367,6 +368,7 @@ func NewParticipant(params ParticipantParams) (*ParticipantImpl, error) {
 		onClose:                       make(map[string]func(types.LocalParticipant)),
 		telemetryGuard:                &telemetry.ReferenceGuard{},
 		nextSubscribedDataTrackHandle: uint16(rand.Intn(256)),
+		requireBroadcast:              params.Grants.Metadata != "" || len(params.Grants.Attributes) != 0,
 	}
 	p.setupSignalling()
 
@@ -2866,6 +2868,7 @@ func (p *ParticipantImpl) addPendingTrackLocked(req *livekit.AddTrackRequest) *l
 						"falling back to alternative video codec",
 						"codec", mimeType,
 						"altCodec", altCodec,
+						"enabledPublishCodecs", logger.ProtoSlice(p.enabledPublishCodecs),
 						"trackID", ti.Sid,
 					)
 					// select an alternative MIME type that's generally supported
@@ -2893,6 +2896,7 @@ func (p *ParticipantImpl) addPendingTrackLocked(req *livekit.AddTrackRequest) *l
 						"falling back to alternative audio codec",
 						"codec", mimeType,
 						"altCodec", altCodec,
+						"enabledPublishCodecs", logger.ProtoSlice(p.enabledPublishCodecs),
 						"trackID", ti.Sid,
 					)
 					// select an alternative MIME type that's generally supported
@@ -3287,6 +3291,7 @@ func (p *ParticipantImpl) addMediaTrack(signalCid string, ti *livekit.TrackInfo)
 		PreferVideoSizeFromMedia:         p.params.PreferVideoSizeFromMedia,
 		EnableRTPStreamRestartDetection:  p.params.EnableRTPStreamRestartDetection,
 		UpdateTrackInfoByVideoSizeChange: p.params.UseOneShotSignallingMode,
+		ForceBackupCodecPolicySimulcast:  p.params.ForceBackupCodecPolicySimulcast,
 	}, ti)
 
 	mt.OnSubscribedMaxQualityChange(p.onSubscribedMaxQualityChange)

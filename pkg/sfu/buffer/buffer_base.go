@@ -31,13 +31,13 @@ import (
 	"go.uber.org/atomic"
 
 	"github.com/livekit/livekit-server/pkg/sfu/audio"
-	"github.com/livekit/livekit-server/pkg/sfu/mime"
 	act "github.com/livekit/livekit-server/pkg/sfu/rtpextension/abscapturetime"
 	dd "github.com/livekit/livekit-server/pkg/sfu/rtpextension/dependencydescriptor"
 	"github.com/livekit/livekit-server/pkg/sfu/rtpstats"
 	"github.com/livekit/livekit-server/pkg/sfu/utils"
 	"github.com/livekit/mediatransportutil/pkg/bucket"
 	"github.com/livekit/mediatransportutil/pkg/nack"
+	"github.com/livekit/protocol/codecs/mime"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/utils/mono"
@@ -444,10 +444,9 @@ func (b *BufferBase) SetStreamRestartDetection(enable bool) {
 }
 
 func (b *BufferBase) setupRTPStats(clockRate uint32) {
-	b.rtpStats = rtpstats.NewRTPStatsReceiver(rtpstats.RTPStatsParams{
-		ClockRate: clockRate,
-		Logger:    b.logger,
-	})
+	b.rtpStats = rtpstats.NewRTPStatsReceiver(rtpstats.RTPStatsParams{})
+	b.rtpStats.SetClockRate(clockRate)
+
 	b.ppsSnapshotId = b.rtpStats.NewSnapshotId()
 	if b.params.IsReportingEnabled {
 		b.rrSnapshotId = b.rtpStats.NewSnapshotId()
@@ -455,10 +454,9 @@ func (b *BufferBase) setupRTPStats(clockRate uint32) {
 	}
 
 	if b.params.IsOOBSequenceNumber {
-		b.rtpStatsLite = rtpstats.NewRTPStatsReceiverLite(rtpstats.RTPStatsParams{
-			ClockRate: clockRate,
-			Logger:    b.logger,
-		})
+		b.rtpStatsLite = rtpstats.NewRTPStatsReceiverLite(rtpstats.RTPStatsParams{})
+		b.rtpStatsLite.SetClockRate(clockRate)
+
 		b.liteStatsSnapshotId = b.rtpStatsLite.NewSnapshotLiteId()
 	}
 }
@@ -769,6 +767,12 @@ func (b *BufferBase) HandleIncomingPacketLocked(
 		return 0, fmt.Errorf("unhandled reason: %s", flowState.UnhandledReason.String())
 	}
 
+	if b.params.IsOOBSequenceNumber {
+		b.updateOOBNACKState(oobSequenceNumber, arrivalTime, len(rawPkt))
+	} else {
+		b.updateNACKState(rtpPacket.SequenceNumber, flowState)
+	}
+
 	if len(rtpPacket.Payload) == 0 && (!flowState.IsOutOfOrder || flowState.IsDuplicate) {
 		// drop padding only in-order or duplicate packet
 		if !flowState.IsOutOfOrder {
@@ -873,12 +877,6 @@ func (b *BufferBase) HandleIncomingPacketLocked(
 
 	b.maybeGrowBucket(arrivalTime)
 
-	if b.params.IsOOBSequenceNumber {
-		b.updateOOBNACKState(oobSequenceNumber, arrivalTime, len(rawPkt))
-	} else {
-		b.updateNACKState(rtpPacket.SequenceNumber, flowState)
-	}
-
 	return ep.ExtSequenceNumber, nil
 }
 
@@ -963,8 +961,6 @@ func (b *BufferBase) handleCodecChange(newPT uint8) {
 	b.payloadType = newPT
 	b.rtxPayloadType = rtxPt
 	b.mime = mime.NormalizeMimeType(newCodec.MimeType)
-
-	b.restartStreamLocked("codec-change", true)
 
 	if f := b.onCodecChange; f != nil {
 		go f(newCodec)
