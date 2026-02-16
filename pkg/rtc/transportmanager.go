@@ -41,7 +41,6 @@ import (
 	"github.com/livekit/livekit-server/pkg/sfu/datachannel"
 	"github.com/livekit/livekit-server/pkg/sfu/interceptor"
 	"github.com/livekit/livekit-server/pkg/sfu/pacer"
-	"github.com/livekit/livekit-server/pkg/telemetry"
 )
 
 const (
@@ -95,7 +94,7 @@ type TransportManagerParams struct {
 	Logger                        logger.Logger
 	PublisherHandler              transport.Handler
 	SubscriberHandler             transport.Handler
-	DataChannelStats              *telemetry.BytesTrackStats
+	DataChannelStats              *BytesTrackStats
 	UseOneShotSignallingMode      bool
 	FireOnTrackBySdp              bool
 	EnableDataTracks              bool
@@ -1026,9 +1025,5 @@ func (t *TransportManager) hasRecentSignalLocked() bool {
 }
 
 func (t *TransportManager) RTPStreamPublished(ssrc uint32, mid, rid string) {
-	if t.params.UseOneShotSignallingMode || t.params.UseSinglePeerConnection {
-		t.publisher.RTPStreamPublished(ssrc, mid, rid)
-	} else {
-		t.subscriber.RTPStreamPublished(ssrc, mid, rid)
-	}
+	t.publisher.RTPStreamPublished(ssrc, mid, rid)
 }
